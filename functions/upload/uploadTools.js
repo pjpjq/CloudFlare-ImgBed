@@ -1,5 +1,5 @@
 import { fetchSecurityConfig } from "../utils/sysConfig";
-import { purgeCFCache } from "../utils/purgeCache";
+import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../utils/purgeCache";
 import { addFileToIndex } from "../utils/indexManager.js";
 import { getDatabase } from '../utils/databaseAdapter.js';
 
@@ -31,35 +31,82 @@ export function generateShortId(length = 8) {
     return result;
 }
 
+const UNKNOWN_IP_ADDRESS = '未知';
+
 // 获取IP地址
-export async function getIPAddress(ip) {
-    let address = '未知';
+export async function getIPAddress(env, ip, securityConfig = null) {
+    if (!env || !ip) return UNKNOWN_IP_ADDRESS;
+
     try {
-        const ipInfo = await fetch(`https://apimobile.meituan.com/locate/v2/ip/loc?rgeo=true&ip=${ip}`);
-        const ipData = await ipInfo.json();
+        const config = securityConfig || await fetchSecurityConfig(env);
+        const ipQuery = config?.upload?.ipQuery;
 
-        if (ipInfo.ok && ipData.data) {
-            const lng = ipData.data?.lng || 0;
-            const lat = ipData.data?.lat || 0;
-
-            // 读取具体地址
-            const addressInfo = await fetch(`https://apimobile.meituan.com/group/v1/city/latlng/${lat},${lng}?tag=0`);
-            const addressData = await addressInfo.json();
-
-            if (addressInfo.ok && addressData.data) {
-                // 根据各字段是否存在，拼接地址
-                address = [
-                    addressData.data.detail,
-                    addressData.data.city,
-                    addressData.data.province,
-                    addressData.data.country
-                ].filter(Boolean).join(', ');
-            }
+        if (!ipQuery?.enabled || ipQuery.channel !== 'customApi') {
+            return UNKNOWN_IP_ADDRESS;
         }
+
+        const customApi = ipQuery.customApi || {};
+        if (!customApi.url) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const responseFields = Array.isArray(customApi.responseFields)
+            ? customApi.responseFields
+                .map(field => typeof field === 'string' ? field : field?.path || '')
+                .filter(Boolean)
+            : [];
+        if (responseFields.length === 0) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const replaceIpPlaceholder = value => String(value ?? '').replace(/\{ip\}/g, ip);
+        const queryUrl = new URL(replaceIpPlaceholder(customApi.url));
+        const paramList = Array.isArray(customApi.params) ? customApi.params : [];
+        for (const param of paramList) {
+            const key = replaceIpPlaceholder(param?.key || '');
+            if (!key) continue;
+            queryUrl.searchParams.append(key, replaceIpPlaceholder(param?.value || ''));
+        }
+
+        const response = await fetch(queryUrl.toString());
+        if (!response.ok) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const data = JSON.parse((await response.text()).trim());
+        const formatValue = value => {
+            if (Array.isArray(value)) {
+                return value.map(formatValue).filter(Boolean).join(', ');
+            }
+            if (typeof value === 'object' && value !== null) {
+                return JSON.stringify(value);
+            }
+            return String(value ?? '').trim();
+        };
+
+        const address = responseFields
+            .map(path => {
+                const value = String(path)
+                    .replace(/\[(\d+)\]/g, '.$1')
+                    .split('.')
+                    .map(segment => segment.trim())
+                    .filter(Boolean)
+                    .reduce((current, segment) => {
+                        if (current === undefined || current === null) return undefined;
+                        return current[segment];
+                    }, data);
+
+                if (value === undefined || value === null || value === '') return '';
+                return formatValue(value);
+            })
+            .filter(Boolean)
+            .join('，');
+
+        return address || UNKNOWN_IP_ADDRESS;
     } catch (error) {
         console.error('Error fetching IP address:', error);
+        return UNKNOWN_IP_ADDRESS;
     }
-    return address;
 }
 
 // 处理文件名中的特殊字符
@@ -71,6 +118,59 @@ export function sanitizeFileName(fileName) {
     return fileName.replace(unsafeCharsRe, '_');
 }
 
+/**
+ * 上传路径安全处理：防止路径穿越，标准化特殊字符
+ * @param {string} folder - 原始上传路径
+ * @returns {string} 安全处理后的路径
+ */
+export function sanitizeUploadFolder(folder) {
+    if (!folder || folder.trim() === '') {
+        return '';
+    }
+
+    // 防止编码绕过：如果检测到 URL 编码字符（%XX），先解码再处理
+    // 注意：url.searchParams.get() 已经做过一次解码，这里是为了防御双重编码攻击（如 %252e%252e）
+    if (/%[0-9a-fA-F]{2}/.test(folder)) {
+        try {
+            folder = decodeURIComponent(folder);
+        } catch (e) {
+            // 解码失败（如 %zz 等非法编码）则使用原始值
+        }
+    }
+
+    // 移除路径穿越字符 ..
+    // 将 .. 替换为 _（无论是否在路径段中）
+    folder = folder.replace(/\.\./g, '_');
+
+    // 将单独的 . 路径段替换为 _（例如 /./）
+    // 处理方式：按 / 分割后，将纯 . 的段替换为 _
+    folder = folder.split('/').map(seg => seg === '.' ? '_' : seg).join('/');
+
+    // 替换反斜杠为正斜杠
+    folder = folder.replace(/\\/g, '/');
+
+    // 将连续斜杠替换为单个斜杠
+    folder = folder.replace(/\/{2,}/g, '/');
+
+    // 移除开头的 /
+    folder = folder.replace(/^\/+/, '');
+
+    // 移除末尾的 /
+    folder = folder.replace(/\/+$/, '');
+
+    // 对每个路径段进行特殊字符处理
+    const segments = folder.split('/');
+    const sanitizedSegments = segments
+        .map(seg => {
+            // 将路径段中的特殊字符替换为 _
+            // 特殊字符包括: \ : * ? " ' < > | 空格 ( ) [ ] { } # % ^ ` ~ ; @ & = + $ ,
+            return seg.replace(/[\\:\*\?"'<>\| \(\)\[\]\{\}#%\^`~;@&=\+\$,]/g, '_');
+        })
+        .filter(seg => seg.length > 0); // 过滤空段
+
+    return sanitizedSegments.join('/');
+}
+
 // 检查文件扩展名是否有效
 export function isExtValid(fileExt) {
     return ['jpeg', 'jpg', 'png', 'gif', 'webp',
@@ -79,6 +179,118 @@ export function isExtValid(fileExt) {
         'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'pdf',
         'txt', 'md', 'json', 'xml', 'html', 'css', 'js', 'ts', 'go', 'java', 'php', 'py', 'rb', 'sh', 'bat', 'cmd', 'ps1', 'psm1', 'psd', 'ai', 'sketch', 'fig', 'svg', 'eps', 'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'apk', 'exe', 'msi', 'dmg', 'iso', 'torrent', 'webp', 'ico', 'svg', 'ttf', 'otf', 'woff', 'woff2', 'eot', 'apk', 'crx', 'xpi', 'deb', 'rpm', 'jar', 'war', 'ear', 'img', 'iso', 'vdi', 'ova', 'ovf', 'qcow2', 'vmdk', 'vhd', 'vhdx', 'pvm', 'dsk', 'hdd', 'bin', 'cue', 'mds', 'mdf', 'nrg', 'ccd', 'cif', 'c2d', 'daa', 'b6t', 'b5t', 'bwt', 'isz', 'isz', 'cdi', 'flp', 'uif', 'xdi', 'sdi'
     ].includes(fileExt);
+}
+/**
+ * 从文件名和文件类型中解析出有效的文件扩展名
+ * @param {string} fileName - 文件名
+ * @param {string} fileType - MIME 类型，如 'image/png'
+ * @returns {string} 文件扩展名
+ */
+export function resolveFileExt(fileName, fileType = 'application/octet-stream') {
+    let fileExt = fileName.split('.').pop();
+    if (fileExt && fileExt !== fileName && isExtValid(fileExt)) {
+        return fileExt;
+    }
+    // 文件名中无有效扩展名，尝试从 MIME 类型中提取
+    const typePart = fileType.split('/').pop();
+    if (typePart && typePart !== fileType) {
+        return typePart;
+    }
+    return 'bin';
+}
+
+
+
+/**
+ * 从图片文件头部提取尺寸信息
+ * 支持 JPEG, PNG, GIF, WebP, BMP 格式
+ * 优先通过文件头魔数检测格式，不依赖 MIME 类型
+ * @param {ArrayBuffer} buffer - 文件的 ArrayBuffer
+ * @param {string} fileType - 文件 MIME 类型（仅作参考）
+ * @returns {Object|null} { width, height } 或 null
+ */
+export function getImageDimensions(buffer, fileType) {
+    try {
+        const view = new DataView(buffer);
+        const uint8 = new Uint8Array(buffer);
+
+        // 通过文件头魔数检测格式（不依赖 MIME 类型）
+
+        // PNG 签名: 89 50 4E 47
+        if (uint8[0] === 0x89 && uint8[1] === 0x50 && uint8[2] === 0x4E && uint8[3] === 0x47) {
+            const width = view.getUint32(16, false);
+            const height = view.getUint32(20, false);
+            return { width, height };
+        }
+
+        // JPEG 签名: FF D8 FF
+        if (uint8[0] === 0xFF && uint8[1] === 0xD8 && uint8[2] === 0xFF) {
+            let offset = 2;
+            while (offset < buffer.byteLength - 9) {
+                if (uint8[offset] !== 0xFF) break;
+                const marker = uint8[offset + 1];
+                // SOF0, SOF1, SOF2 标记包含尺寸信息
+                if (marker >= 0xC0 && marker <= 0xC3 && marker !== 0xC4) {
+                    const height = view.getUint16(offset + 5, false);
+                    const width = view.getUint16(offset + 7, false);
+                    return { width, height };
+                }
+                const length = view.getUint16(offset + 2, false);
+                offset += 2 + length;
+            }
+            return null;
+        }
+
+        // GIF 签名: 47 49 46 (GIF)
+        if (uint8[0] === 0x47 && uint8[1] === 0x49 && uint8[2] === 0x46) {
+            const width = view.getUint16(6, true); // little-endian
+            const height = view.getUint16(8, true);
+            return { width, height };
+        }
+
+        // WebP 签名: RIFF....WEBP
+        if (uint8[0] === 0x52 && uint8[1] === 0x49 && uint8[2] === 0x46 && uint8[3] === 0x46 &&
+            uint8[8] === 0x57 && uint8[9] === 0x45 && uint8[10] === 0x42 && uint8[11] === 0x50) {
+            // VP8 (lossy): VP8 + 空格
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x20) {
+                if (buffer.byteLength >= 30) {
+                    const width = (view.getUint16(26, true) & 0x3FFF);
+                    const height = (view.getUint16(28, true) & 0x3FFF);
+                    return { width, height };
+                }
+            }
+            // VP8L (lossless): VP8L
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x4C) {
+                if (buffer.byteLength >= 25) {
+                    const bits = view.getUint32(21, true);
+                    const width = (bits & 0x3FFF) + 1;
+                    const height = ((bits >> 14) & 0x3FFF) + 1;
+                    return { width, height };
+                }
+            }
+            // VP8X (extended): VP8X
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x58) {
+                if (buffer.byteLength >= 30) {
+                    const width = (uint8[24] | (uint8[25] << 8) | (uint8[26] << 16)) + 1;
+                    const height = (uint8[27] | (uint8[28] << 8) | (uint8[29] << 16)) + 1;
+                    return { width, height };
+                }
+            }
+            return null;
+        }
+
+        // BMP 签名: 42 4D (BM)
+        if (uint8[0] === 0x42 && uint8[1] === 0x4D) {
+            const width = view.getInt32(18, true);
+            const height = Math.abs(view.getInt32(22, true)); // height 可能为负数
+            return { width, height };
+        }
+
+        return null;
+    } catch (error) {
+        console.error('Error extracting image dimensions:', error);
+        return null;
+    }
 }
 
 // 图像审查
@@ -102,7 +314,12 @@ export async function moderateContent(env, url) {
             label = "None";
         } else {
             try {
-                const fetchResponse = await fetch(`https://api.moderatecontent.com/moderate/?key=${apikey}&url=${url}`);
+                const params = new URLSearchParams({ key: apikey, url: url });
+                const fetchResponse = await fetch('https://api.moderatecontent.com/moderate/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: params.toString()
+                });
                 if (!fetchResponse.ok) {
                     throw new Error(`HTTP error! status: ${fetchResponse.status}`);
                 }
@@ -119,7 +336,7 @@ export async function moderateContent(env, url) {
         return label;
     }
 
-    // nsfw 渠道 和 默认渠道
+    // nsfw 渠道
     if (uploadModerate.channel === 'nsfwjs') {
         const nsfwApiPath = securityConfig.upload.moderate.nsfwApiPath;
 
@@ -163,28 +380,18 @@ export async function purgeCDNCache(env, cdnUrl, url, normalizedFolder) {
         console.error('Failed to clear CDN cache:', error);
     }
 
-    // 清除api/randomFileList API缓存
-    try {
-        const cache = caches.default;
-        // await cache.delete(`${url.origin}/api/randomFileList`); delete有bug，通过写入一个max-age=0的response来清除缓存
-        const nullResponse = new Response(null, {
-            headers: { 'Cache-Control': 'max-age=0' },
-        });
-
-        await cache.put(`${url.origin}/api/randomFileList?dir=${normalizedFolder}`, nullResponse);
-    } catch (error) {
-        console.error('Failed to clear cache:', error);
-    }
+    // 清除 api/randomFileList 等API缓存
+    await purgeRandomFileListCache(url.origin, normalizedFolder);
+    await purgePublicFileListCache(url.origin, normalizedFolder);
 }
 
 // 结束上传：清除缓存，维护索引
-// 注意：容量统计现在由索引自动维护，不需要单独更新 quota
 export async function endUpload(context, fileId, metadata) {
     const { env, url } = context;
 
     // 清除CDN缓存
     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
-    const normalizedFolder = (url.searchParams.get('uploadFolder') || '').replace(/^\/+/, '').replace(/\/{2,}/g, '/').replace(/\/$/, '');
+    const normalizedFolder = sanitizeUploadFolder(url.searchParams.get('uploadFolder') || '');
     await purgeCDNCache(env, cdnUrl, url, normalizedFolder);
 
     // 更新文件索引（索引更新时会自动计算容量统计）
@@ -230,26 +437,12 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     const { env, url } = context;
     const db = getDatabase(env);
 
-    let fileExt = fileName.split('.').pop();
-    if (!fileExt || fileExt === fileName) {
-        fileExt = fileType.split('/').pop();
-        if (fileExt === fileType || fileExt === '' || fileExt === null || fileExt === undefined) {
-            fileExt = 'unknown';
-        }
-    }
+    const fileExt = resolveFileExt(fileName, fileType);
 
     const nameType = url.searchParams.get('uploadNameType') || 'default';
     const uploadFolder = url.searchParams.get('uploadFolder') || '';
-    const normalizedFolder = uploadFolder
-        ? uploadFolder.replace(/^\/+/, '').replace(/\/{2,}/g, '/').replace(/\/$/, '')
-        : '';
-
-    if (!isExtValid(fileExt)) {
-        fileExt = fileType.split('/').pop();
-        if (fileExt === fileType || fileExt === '' || fileExt === null || fileExt === undefined) {
-            fileExt = 'unknown';
-        }
-    }
+    // 对上传路径进行安全处理
+    const normalizedFolder = sanitizeUploadFolder(uploadFolder);
 
     // 处理文件名，移除特殊字符
     fileName = sanitizeFileName(fileName);
