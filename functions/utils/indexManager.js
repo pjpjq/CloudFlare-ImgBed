@@ -43,7 +43,7 @@ import { matchesTags } from './tagHelpers.js';
 const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
 const OPERATION_KEY_PREFIX = 'manage@index@operation_';
-const INDEX_CHUNK_SIZE = 10000; // 索引分块大小
+const INDEX_CHUNK_SIZE = 500; // 索引分块大小（避免超过 D1 2 MB 单行限制）
 const KV_LIST_LIMIT = 1000; // 数据库列出批量大小
 const BATCH_SIZE = 10; // 批量处理大小
 
