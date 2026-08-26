@@ -17,7 +17,7 @@ export function createDatabaseAdapter(env) {
         return new KVAdapter(env.img_url);
     } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
         // 使用D1数据库
-        return new D1Database(env.img_d1);
+        return new D1Database(env.img_d1, env.img_index);
     } else {
         console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
         return null;

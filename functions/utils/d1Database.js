@@ -3,8 +3,14 @@
  */
 
 class D1Database {
-    constructor(db) {
+    constructor(db, indexDb) {
         this.db = db;
+        // 索引数据可选地放到独立 D1，未配置时回退到主库，兼容旧部署。
+        this.indexDb = indexDb && typeof indexDb.prepare === 'function' ? indexDb : db;
+    }
+
+    databaseForKey(key) {
+        return typeof key === 'string' && key.startsWith('manage@index') ? this.indexDb : this.db;
     }
 }
 
@@ -21,7 +27,7 @@ D1Database.prototype.putFile = function(fileId, value, options) {
     // 从metadata中提取字段用于索引
     var extractedFields = this.extractMetadataFields(metadata);
     
-    var stmt = this.db.prepare(
+    var stmt = this.databaseForKey(fileId).prepare(
         'INSERT OR REPLACE INTO files (' +
         'id, value, metadata, file_name, file_type, file_size, ' +
         'upload_ip, upload_address, list_type, timestamp, ' +
@@ -56,8 +62,7 @@ D1Database.prototype.putFile = function(fileId, value, options) {
  * 获取文件记录 (替代 KV.get)
  */
 D1Database.prototype.getFile = function(fileId) {
-    var self = this;
-    var stmt = this.db.prepare('SELECT * FROM files WHERE id = ?');
+    var stmt = this.databaseForKey(fileId).prepare('SELECT * FROM files WHERE id = ?');
     return stmt.bind(fileId).first().then(function(result) {
         if (!result) return null;
         
@@ -79,7 +84,7 @@ D1Database.prototype.getFileWithMetadata = function(fileId) {
  * 删除文件记录 (替代 KV.delete)
  */
 D1Database.prototype.deleteFile = function(fileId) {
-    var stmt = this.db.prepare('DELETE FROM files WHERE id = ?');
+    var stmt = this.databaseForKey(fileId).prepare('DELETE FROM files WHERE id = ?');
     return stmt.bind(fileId).run();
 };
 
@@ -109,7 +114,7 @@ D1Database.prototype.listFiles = function(options) {
     query += ' ORDER BY id LIMIT ?';
     params.push(limit + 1);
     
-    var stmt = this.db.prepare(query);
+    var stmt = this.databaseForKey(prefix).prepare(query);
     if (params.length > 0) {
         stmt = stmt.bind.apply(stmt, params);
     }
@@ -212,7 +217,7 @@ D1Database.prototype.listSettings = function(options) {
  * 保存索引操作记录
  */
 D1Database.prototype.putIndexOperation = function(operationId, operation) {
-    var stmt = this.db.prepare(
+    var stmt = this.indexDb.prepare(
         'INSERT OR REPLACE INTO index_operations (id, type, timestamp, data) VALUES (?, ?, ?, ?)'
     );
     
@@ -228,7 +233,7 @@ D1Database.prototype.putIndexOperation = function(operationId, operation) {
  * 获取索引操作记录
  */
 D1Database.prototype.getIndexOperation = function(operationId) {
-    var stmt = this.db.prepare('SELECT * FROM index_operations WHERE id = ?');
+    var stmt = this.indexDb.prepare('SELECT * FROM index_operations WHERE id = ?');
     return stmt.bind(operationId).first().then(function(result) {
         if (!result) return null;
         
@@ -244,7 +249,7 @@ D1Database.prototype.getIndexOperation = function(operationId) {
  * 删除索引操作记录
  */
 D1Database.prototype.deleteIndexOperation = function(operationId) {
-    var stmt = this.db.prepare('DELETE FROM index_operations WHERE id = ?');
+    var stmt = this.indexDb.prepare('DELETE FROM index_operations WHERE id = ?');
     return stmt.bind(operationId).run();
 };
 
@@ -267,7 +272,7 @@ D1Database.prototype.listIndexOperations = function(options) {
     query += ' ORDER BY timestamp LIMIT ?';
     params.push(limit);
     
-    var stmt = this.db.prepare(query);
+    var stmt = this.indexDb.prepare(query);
     if (params.length > 0) {
         stmt = stmt.bind.apply(stmt, params);
     }
