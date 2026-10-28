@@ -29,7 +29,7 @@ jobs:
           mkdir -p "$DEPS/deploy"
           cp package.json package-lock.json "$DEPS/"
           cp -R deploy/profiles "$DEPS/deploy/"
-          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+          docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
             --memory 1024m --cpus 1 --pids-limit 96 --ulimit fsize=268435456 \
             --tmpfs /tmp:rw,noexec,nosuid,size=128m --volume "$DEPS:/scratch:rw" \
             --workdir /scratch --entrypoint /usr/bin/env "$NODE_IMAGE" -i \

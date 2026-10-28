@@ -51,7 +51,7 @@ docker pull "$NODE_IMAGE"
 mkdir -p "$BUILD_TOOLS/deploy"
 cp "$IMGBED_REPO/package.json" "$IMGBED_REPO/package-lock.json" "$BUILD_TOOLS/"
 cp -R "$IMGBED_REPO/deploy/profiles" "$BUILD_TOOLS/deploy/"
-docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
   --memory 1024m --cpus 1 --pids-limit 96 --ulimit fsize=268435456 \
   --tmpfs /tmp:rw,noexec,nosuid,size=128m --volume "$BUILD_TOOLS:/scratch:rw" \
   --workdir /scratch --entrypoint /usr/bin/env "$NODE_IMAGE" -i \
