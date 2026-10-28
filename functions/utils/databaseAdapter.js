@@ -3,7 +3,7 @@
  * 提供统一的接口，可以在KV和D1之间切换
  */
 
-import { D1Database } from './d1Database.js';
+import { ShardedD1Database } from './shardedD1Database.js';
 
 /**
  * 创建数据库适配器
@@ -17,7 +17,7 @@ export function createDatabaseAdapter(env) {
         return new KVAdapter(env.img_url);
     } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
         // 使用D1数据库
-        return new D1Database(env.img_d1, env.img_index);
+        return new ShardedD1Database(env.img_d1, env.img_index);
     } else {
         console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
         return null;

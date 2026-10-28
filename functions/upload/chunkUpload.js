@@ -1,9 +1,12 @@
+import { createS3Client } from '../utils/storage/s3Client.js';
 /* ======= 客户端分块上传处理 ======= */
 import { createResponse, selectConsistentChannel, getUploadIp, getIPAddress, buildUniqueFileId, endUpload } from './uploadTools';
-import { TelegramAPI } from '../utils/telegramAPI';
-import { DiscordAPI } from '../utils/discordAPI';
-import { S3Client, CreateMultipartUploadCommand, UploadPartCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
-import { getDatabase } from '../utils/databaseAdapter.js';
+import { TelegramAPI } from '../utils/storage/telegramAPI';
+import { DiscordAPI } from '../utils/storage/discordAPI';
+import { CreateMultipartUploadCommand, UploadPartCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
+import { getDatabase, checkDatabaseConfig } from '../utils/databaseAdapter.js';
+import { fetchPageConfig } from '../utils/sysConfig.js';
+import { resolveFileType } from '../utils/mimeTypes.js';
 
 // 初始化分块上传
 export async function initializeChunkedUpload(context) {
@@ -15,7 +18,7 @@ export async function initializeChunkedUpload(context) {
         const formdata = await request.formData();
 
         const originalFileName = formdata.get('originalFileName');
-        const originalFileType = formdata.get('originalFileType');
+        const originalFileType = resolveFileType(originalFileName, formdata.get('originalFileType'));
         const totalChunks = parseInt(formdata.get('totalChunks'));
 
         if (!originalFileName || !originalFileType || !totalChunks) {
@@ -29,10 +32,15 @@ export async function initializeChunkedUpload(context) {
 
         // 获取上传IP
         const uploadIp = getUploadIp(request);
-        const ipAddress = await getIPAddress(uploadIp);
+        const ipAddress = await getIPAddress(env, uploadIp, context.securityConfig);
 
         // 获取上传渠道
         const uploadChannel = url.searchParams.get('uploadChannel') || 'telegram';
+        if (uploadChannel === 'webdav') {
+            return createResponse('Error: WebDAV channel does not support chunked uploads. Please use non-chunked upload within your Cloudflare request body limit.', { status: 400 });
+        }
+        // 获取指定的渠道名称
+        const channelName = url.searchParams.get('channelName') || '';
 
         // 存储上传会话信息
         const sessionInfo = {
@@ -41,6 +49,7 @@ export async function initializeChunkedUpload(context) {
             originalFileType,
             totalChunks,
             uploadChannel,
+            channelName,
             uploadIp,
             ipAddress,
             status: 'initialized',
@@ -62,7 +71,8 @@ export async function initializeChunkedUpload(context) {
                 uploadId,
                 originalFileName,
                 totalChunks,
-                uploadChannel
+                uploadChannel,
+                channelName
             }
         }), {
             status: 200,
@@ -89,7 +99,7 @@ export async function handleChunkUpload(context) {
         const totalChunks = parseInt(formdata.get('totalChunks'));
         const uploadId = formdata.get('uploadId');
         const originalFileName = formdata.get('originalFileName');
-        const originalFileType = formdata.get('originalFileType');
+        const originalFileType = resolveFileType(originalFileName, formdata.get('originalFileType'));
 
         if (!chunk || chunkIndex === null || !totalChunks || !uploadId || !originalFileName || !originalFileType) {
             return createResponse('Error: Missing chunk upload parameters', { status: 400 });
@@ -117,6 +127,14 @@ export async function handleChunkUpload(context) {
 
         // 获取上传渠道
         const uploadChannel = url.searchParams.get('uploadChannel') || sessionInfo.uploadChannel || 'telegram';
+        if (uploadChannel === 'webdav') {
+            return createResponse('Error: WebDAV channel does not support chunked uploads. Please use non-chunked upload within your Cloudflare request body limit.', { status: 400 });
+        }
+        // 获取指定的渠道名称
+        const channelName = url.searchParams.get('channelName') || sessionInfo.channelName || '';
+
+        // 将渠道名称存入 context
+        context.specifiedChannelName = channelName;
 
         // 立即创建分块记录，标记为"uploading"状态
         const chunkKey = `chunk_${uploadId}_${chunkIndex.toString().padStart(3, '0')}`;
@@ -137,13 +155,14 @@ export async function handleChunkUpload(context) {
         };
 
         // 立即保存分块记录和数据，设置过期时间
-        await db.put(chunkKey, chunkData, {
+        const { usingD1 } = checkDatabaseConfig(env);
+        await db.put(chunkKey, usingD1 ? '' : chunkData, {
             metadata: initialChunkMetadata,
             expirationTtl: 3600 // 1小时过期
         });
 
         // 同步上传分块到存储端，添加超时保护
-        await uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel);
+        await uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel, usingD1 ? chunkData : undefined);
 
         return createResponse(JSON.stringify({
             success: true,
@@ -193,7 +212,7 @@ export async function handleCleanupRequest(context, uploadId, totalChunks) {
 /* ======= 单个分块上传到不同渠道的存储端 ======= */
 
 // 带超时保护的异步上传分块到存储端
-async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel) {
+async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel, chunkData) {
     const { env } = context;
     const db = getDatabase(env);
     const chunkKey = `chunk_${uploadId}_${chunkIndex.toString().padStart(3, '0')}`;
@@ -206,7 +225,7 @@ async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks,
         });
 
         // 执行实际上传
-        const uploadPromise = uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel);
+        const uploadPromise = uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel, chunkData);
 
         // 竞速执行
         await Promise.race([uploadPromise, timeoutPromise]);
@@ -216,6 +235,7 @@ async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks,
 
         // 超时或失败时，更新状态为超时/失败
         try {
+            const { usingD1 } = checkDatabaseConfig(env);
             const chunkRecord = await db.getWithMetadata(chunkKey, { type: 'arrayBuffer' });
             if (chunkRecord && chunkRecord.metadata) {
                 const isTimeout = error.message === 'Upload timeout';
@@ -227,8 +247,8 @@ async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks,
                     isTimeout: isTimeout
                 };
 
-                // 保留原始数据以便重试
-                await db.put(chunkKey, chunkRecord.value, {
+                // 保留原始数据以便重试（D1模式下不保存二进制数据，避免SQLITE_TOOBIG）
+                await db.put(chunkKey, usingD1 ? '' : chunkRecord.value, {
                     metadata: errorMetadata,
                     expirationTtl: 3600
                 });
@@ -240,7 +260,7 @@ async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks,
 }
 
 // 异步上传分块到存储端，失败自动重试
-async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel) {
+async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel, chunkData) {
     const { env } = context;
     const db = getDatabase(env);
 
@@ -249,15 +269,22 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
     const MAX_RETRIES = 3;
 
     try {
-        // 从数据库分块数据和metadata
-        const chunkRecord = await db.getWithMetadata(chunkKey, { type: 'arrayBuffer' });
-        if (!chunkRecord || !chunkRecord.value) {
-            console.error(`Chunk ${chunkIndex} data not found in database`);
-            return;
-        }
+        let chunkMetadata;
 
-        const chunkData = chunkRecord.value;
-        const chunkMetadata = chunkRecord.metadata;
+        if (chunkData !== undefined) {
+            const chunkRecord = await db.getWithMetadata(chunkKey);
+            chunkMetadata = (chunkRecord && chunkRecord.metadata) ? chunkRecord.metadata : {};
+        } else {
+            // 从数据库读取分块数据和metadata
+            const chunkRecord = await db.getWithMetadata(chunkKey, { type: 'arrayBuffer' });
+            if (!chunkRecord || !chunkRecord.value) {
+                console.error(`Chunk ${chunkIndex} data not found in database`);
+                return;
+            }
+
+            chunkData = chunkRecord.value;
+            chunkMetadata = chunkRecord.metadata;
+        }
 
         for (let retry = 0; retry < MAX_RETRIES; retry++) {
             // 根据渠道上传分块
@@ -300,8 +327,9 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
                     failedTime: Date.now()
                 };
 
-                // 保留原始数据以便重试，设置过期时间
-                await db.put(chunkKey, chunkData, {
+                // 保留原始数据以便重试（D1模式下不保存二进制数据，避免SQLITE_TOOBIG）
+                const { usingD1: isD1 } = checkDatabaseConfig(env);
+                await db.put(chunkKey, isD1 ? '' : chunkData, {
                     metadata: failedMetadata,
                     expirationTtl: 3600 // 1小时过期
                 });
@@ -315,6 +343,7 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
 
         // 发生异常时，确保保留原始数据并标记为失败
         try {
+            const { usingD1: isD1 } = checkDatabaseConfig(env);
             const chunkRecord = await db.getWithMetadata(chunkKey, { type: 'arrayBuffer' });
             if (chunkRecord && chunkRecord.metadata) {
                 const errorMetadata = {
@@ -324,7 +353,8 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
                     failedTime: Date.now()
                 };
 
-                await db.put(chunkKey, chunkRecord.value, {
+                // D1模式下不保存二进制数据，避免SQLITE_TOOBIG
+                await db.put(chunkKey, isD1 ? '' : chunkRecord.value, {
                     metadata: errorMetadata,
                     expirationTtl: 3600 // 1小时过期
                 });
@@ -355,7 +385,9 @@ async function uploadSingleChunkToR2Multipart(context, chunkData, chunkIndex, to
         if (chunkIndex === 0) {
             finalFileId = await buildUniqueFileId(context, originalFileName, originalFileType);
 
-            const multipartUpload = await R2DataBase.createMultipartUpload(finalFileId);
+            const multipartUpload = await R2DataBase.createMultipartUpload(finalFileId, {
+                httpMetadata: { contentType: originalFileType },
+            });
             const multipartInfo = {
                 uploadId: multipartUpload.uploadId,
                 key: finalFileId
@@ -425,13 +457,21 @@ async function uploadSingleChunkToR2Multipart(context, chunkData, chunkIndex, to
 
 // 上传单个分块到S3 (Multipart Upload)
 async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { env, uploadConfig } = context;
+    const { env, uploadConfig, specifiedChannelName } = context;
     const db = getDatabase(env);
 
     try {
         const s3Settings = uploadConfig.s3;
         const s3Channels = s3Settings.channels;
-        const s3Channel = selectConsistentChannel(s3Channels, uploadId, s3Settings.loadBalance.enabled);
+        
+        // 优先使用指定的渠道名称
+        let s3Channel;
+        if (specifiedChannelName) {
+            s3Channel = s3Channels.find(ch => ch.name === specifiedChannelName);
+        }
+        if (!s3Channel) {
+            s3Channel = selectConsistentChannel(s3Channels, uploadId, s3Settings.loadBalance.enabled);
+        }
 
         console.log(`Uploading S3 chunk ${chunkIndex} for uploadId: ${uploadId}, selected channel: ${s3Channel.name || 'default'}`);
 
@@ -439,14 +479,9 @@ async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, to
             return { success: false, error: 'No S3 channel provided' };
         }
 
-        const { endpoint, pathStyle, accessKeyId, secretAccessKey, bucketName, region } = s3Channel;
+        const { bucketName } = s3Channel;
 
-        const s3Client = new S3Client({
-            region: region || "auto",
-            endpoint,
-            credentials: { accessKeyId, secretAccessKey },
-            forcePathStyle: pathStyle
-        });
+        const s3Client = createS3Client(s3Channel);
 
         const multipartKey = `multipart_${uploadId}`;
 
@@ -529,6 +564,7 @@ async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, to
         };
 
     } catch (error) {
+        console.error(`S3 chunk upload error (chunk ${chunkIndex}):`, error.message, error.name, error.$metadata);
         return {
             success: false,
             error: error.message
@@ -538,12 +574,20 @@ async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, to
 
 // 上传单个分块到Telegram
 async function uploadSingleChunkToTelegram(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { uploadConfig } = context;
+    const { uploadConfig, specifiedChannelName } = context;
 
     try {
         const tgSettings = uploadConfig.telegram;
         const tgChannels = tgSettings.channels;
-        const tgChannel = selectConsistentChannel(tgChannels, uploadId, tgSettings.loadBalance.enabled);
+        
+        // 优先使用指定的渠道名称
+        let tgChannel;
+        if (specifiedChannelName) {
+            tgChannel = tgChannels.find(ch => ch.name === specifiedChannelName);
+        }
+        if (!tgChannel) {
+            tgChannel = selectConsistentChannel(tgChannels, uploadId, tgSettings.loadBalance.enabled);
+        }
 
         console.log(`Uploading Telegram chunk ${chunkIndex} for uploadId: ${uploadId}, selected channel: ${tgChannel.name || 'default'}`);
 
@@ -553,15 +597,17 @@ async function uploadSingleChunkToTelegram(context, chunkData, chunkIndex, total
 
         const tgBotToken = tgChannel.botToken;
         const tgChatId = tgChannel.chatId;
+        const tgProxyUrl = tgChannel.proxyUrl || '';
 
         // 创建分块文件名
         const chunkFileName = `${originalFileName}.part${chunkIndex.toString().padStart(3, '0')}`;
         const chunkBlob = new Blob([chunkData], { type: 'application/octet-stream' });
 
-        // 上传分块到Telegram
+        // 上传分块到Telegram（支持代理域名）
         const chunkInfo = await uploadChunkToTelegramWithRetry(
             tgBotToken,
             tgChatId,
+            tgProxyUrl,
             chunkBlob,
             chunkFileName,
             chunkIndex,
@@ -592,12 +638,20 @@ async function uploadSingleChunkToTelegram(context, chunkData, chunkIndex, total
 
 // 上传单个分块到Discord
 async function uploadSingleChunkToDiscord(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { uploadConfig } = context;
+    const { uploadConfig, specifiedChannelName } = context;
 
     try {
         const discordSettings = uploadConfig.discord;
         const discordChannels = discordSettings.channels;
-        const discordChannel = selectConsistentChannel(discordChannels, uploadId, discordSettings.loadBalance?.enabled);
+        
+        // 优先使用指定的渠道名称
+        let discordChannel;
+        if (specifiedChannelName) {
+            discordChannel = discordChannels.find(ch => ch.name === specifiedChannelName);
+        }
+        if (!discordChannel) {
+            discordChannel = selectConsistentChannel(discordChannels, uploadId, discordSettings.loadBalance?.enabled);
+        }
 
         console.log(`Uploading Discord chunk ${chunkIndex} for uploadId: ${uploadId}, selected channel: ${discordChannel.name || 'default'}`);
 
@@ -630,8 +684,8 @@ async function uploadSingleChunkToDiscord(context, chunkData, chunkIndex, totalC
         return {
             success: true,
             messageId: chunkInfo.message_id,
-            attachmentId: chunkInfo.attachment_id,
-            url: chunkInfo.url,
+            // 注意：不存储 attachmentId 和 url，因为它们会在约24小时后过期
+            // 读取时会通过 messageId 获取新的 URL
             size: chunkInfo.file_size,
             fileName: chunkFileName,
             uploadTime: Date.now(),
@@ -653,7 +707,7 @@ async function uploadChunkToDiscordWithRetry(botToken, channelId, chunkBlob, chu
             const discordAPI = new DiscordAPI(botToken);
 
             const response = await discordAPI.sendFile(chunkBlob, channelId, chunkFileName);
-            
+
             if (!response || !response.id) {
                 throw new Error('Invalid Discord response');
             }
@@ -804,17 +858,18 @@ async function retrySingleChunk(context, chunk, uploadChannel, maxRetries = 5, r
 
         const chunkData = chunkRecord.value;
         const originalFileName = chunkRecord.metadata?.originalFileName || 'unknown';
-        const originalFileType = chunkRecord.metadata?.originalFileType || 'application/octet-stream';
+        const originalFileType = resolveFileType(originalFileName, chunkRecord.metadata?.originalFileType);
         const uploadId = chunkRecord.metadata?.uploadId;
         const totalChunks = chunkRecord.metadata?.totalChunks || 1;
 
         // 更新重试状态
+        const { usingD1: isD1 } = checkDatabaseConfig(env);
         const retryMetadata = {
             ...chunkRecord.metadata,
             status: 'retrying',
         };
 
-        await db.put(chunk.key, chunkData, {
+        await db.put(chunk.key, isD1 ? '' : chunkData, {
             metadata: retryMetadata,
             expirationTtl: 3600
         });
@@ -876,6 +931,7 @@ async function retrySingleChunk(context, chunk, uploadChannel, maxRetries = 5, r
 
         // 更新重试失败状态
         try {
+            const { usingD1: isD1Retry } = checkDatabaseConfig(env);
             const chunkRecord = await db.getWithMetadata(chunk.key, { type: 'arrayBuffer' });
             if (chunkRecord) {
                 const failedRetryMetadata = {
@@ -883,7 +939,8 @@ async function retrySingleChunk(context, chunk, uploadChannel, maxRetries = 5, r
                     status: isTimeout ? 'retry_timeout' : 'retry_failed'
                 };
 
-                await db.put(chunk.key, chunkRecord.value, {
+                // D1模式下不保存二进制数据，避免SQLITE_TOOBIG
+                await db.put(chunk.key, isD1Retry ? '' : chunkRecord.value, {
                     metadata: failedRetryMetadata,
                     expirationTtl: 3600
                 });
@@ -929,17 +986,21 @@ export async function cleanupFailedMultipartUploads(context, uploadId, uploadCha
             // 清理S3 multipart upload
             const s3Settings = uploadConfig.s3;
             const s3Channels = s3Settings.channels;
-            const s3Channel = selectConsistentChannel(s3Channels, uploadId, s3Settings.loadBalance.enabled);
+            
+            // 优先使用指定的渠道名称
+            let s3Channel;
+            const specifiedChannelName = context.specifiedChannelName;
+            if (specifiedChannelName) {
+                s3Channel = s3Channels.find(ch => ch.name === specifiedChannelName);
+            }
+            if (!s3Channel) {
+                s3Channel = selectConsistentChannel(s3Channels, uploadId, s3Settings.loadBalance.enabled);
+            }
 
             if (s3Channel) {
-                const { endpoint, pathStyle, accessKeyId, secretAccessKey, bucketName, region } = s3Channel;
+                const { bucketName } = s3Channel;
 
-                const s3Client = new S3Client({
-                    region: region || "auto",
-                    endpoint,
-                    credentials: { accessKeyId, secretAccessKey },
-                    forcePathStyle: pathStyle
-                });
+                const s3Client = createS3Client(s3Channel);
 
                 await s3Client.send(new AbortMultipartUploadCommand({
                     Bucket: bucketName,
@@ -978,6 +1039,7 @@ export async function checkChunkUploadStatuses(env, uploadId, totalChunks) {
                     status = 'timeout';
 
                     // 更新状态为超时
+                    const { usingD1: isD1Status } = checkDatabaseConfig(env);
                     const timeoutMetadata = {
                         ...chunkRecord.metadata,
                         status: 'timeout',
@@ -985,7 +1047,8 @@ export async function checkChunkUploadStatuses(env, uploadId, totalChunks) {
                         timeoutDetectedTime: currentTime
                     };
 
-                    await db.put(chunkKey, chunkRecord.value, {
+                    // D1模式下不保存二进制数据，避免SQLITE_TOOBIG
+                    await db.put(chunkKey, isD1Status ? '' : chunkRecord.value, {
                         metadata: timeoutMetadata,
                         expirationTtl: 3600
                     }).catch(err => console.warn(`Failed to update timeout status for chunk ${i}:`, err));
@@ -1146,9 +1209,11 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
             const chunkFileName = `${fileName}.part${i.toString().padStart(3, '0')}`;
 
             // 上传分片（带重试机制）
+            const tgProxyUrl = tgChannel.proxyUrl || '';
             const chunkInfo = await uploadChunkToTelegramWithRetry(
                 tgBotToken,
                 tgChatId,
+                tgProxyUrl,
                 chunkBlob,
                 chunkFileName,
                 i,
@@ -1182,8 +1247,6 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
         // 所有分片上传成功，更新metadata
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
-        metadata.TgChatId = tgChatId;
-        metadata.TgBotToken = tgBotToken;
         metadata.IsChunked = true;
         metadata.TotalChunks = totalChunks;
         metadata.FileSize = (fileSize / 1024 / 1024).toFixed(2);
@@ -1203,8 +1266,17 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
         // 异步结束上传
         waitUntil(endUpload(context, fullId, metadata));
 
+        // 构建公开访问链接（使用 urlPrefix 配置）
+        const pageConfig = await fetchPageConfig(env);
+        const urlPrefixConfig = pageConfig.config?.find(c => c.id === 'urlPrefix');
+        const urlPrefix = urlPrefixConfig?.value || '';
+        const responseBody = [{ 'src': returnLink }];
+        if (urlPrefix) {
+            responseBody[0].publicUrl = `${urlPrefix.replace(/\/+$/, '')}/${fullId}`;
+        }
+
         return createResponse(
-            JSON.stringify([{ 'src': returnLink }]),
+            JSON.stringify(responseBody),
             {
                 status: 200,
                 headers: {
@@ -1218,11 +1290,11 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
     }
 }
 
-// 将每个分块上传至Telegram，支持失败重试
-async function uploadChunkToTelegramWithRetry(tgBotToken, tgChatId, chunkBlob, chunkFileName, chunkIndex, totalChunks, maxRetries = 2) {
+// 将每个分块上传至Telegram，支持失败重试（支持代理域名）
+async function uploadChunkToTelegramWithRetry(tgBotToken, tgChatId, tgProxyUrl, chunkBlob, chunkFileName, chunkIndex, totalChunks, maxRetries = 2) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const tgAPI = new TelegramAPI(tgBotToken);
+            const tgAPI = new TelegramAPI(tgBotToken, tgProxyUrl);
 
             const caption = `Part ${chunkIndex + 1}/${totalChunks}`;
 

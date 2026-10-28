@@ -1,21 +1,34 @@
-import { fetchPageConfig } from "../utils/sysConfig";
+/**
+ * 用户端页面配置 API
+ * 负责读取页面配置并转换为前端可直接使用的用户配置对象
+ */
+import { fetchPageConfig } from "../utils/sysConfig.js";
 
 export async function onRequest(context) {
-    const { request, env, params, waitUntil, next, data } = context;
+    const { env } = context;
     const PageConfig = await fetchPageConfig(env);
     const userConfigList = PageConfig.config;
     const userConfig = {};
     
     for (const config of userConfigList) {
-        if (config.value) {
+        if (config.value !== undefined && config.value !== null && config.value !== '') {
             // 将config解析为JSON对象，若解析失败则返回原始字符串
             try {
                 userConfig[config.id] = JSON.parse(config.value);
             } catch (error) {
                 userConfig[config.id] = config.value;
             }
+        } else if (config.default !== undefined) {
+            // 未配置的项目使用其声明的默认值
+            userConfig[config.id] = config.default;
         }
     }
+
+    if (Number.isFinite(Number(PageConfig.announcementRefreshAt))) {
+        userConfig.announcementRefreshAt = Number(PageConfig.announcementRefreshAt);
+    }
+
+    userConfig.serverRuntime = env.SERVER_RUNTIME;
 
     // 检查 USER_CONFIG 是否为空或未定义
     if (!userConfig) {
