@@ -1,0 +1,31 @@
+name: Fork compatibility checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, codex/sync-upstream-disable-telemetry]
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Prepare Node.js runtime
+        run: docker pull node:22-bookworm-slim
+      - name: Run isolated compatibility checks
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 512m --cpus 1 --pids-limit 64 \
+            --ulimit cpu=60:65 --ulimit fsize=8388608 --ulimit nofile=128:128 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --volume "$PWD:/app:ro" --workdir /app --entrypoint /usr/bin/env \
+            node:22-bookworm-slim -i HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/timeout --signal=KILL 90 /usr/local/bin/node --max-old-space-size=256 \
+            --test test/d1DatabaseShard.test.mjs test/indexManagerChunk.test.mjs test/telemetryDisabled.test.mjs

@@ -3,14 +3,8 @@
  */
 
 class D1Database {
-    constructor(db, indexDb) {
+    constructor(db) {
         this.db = db;
-        // 索引数据可选地放到独立 D1，未配置时回退到主库，兼容旧部署。
-        this.indexDb = indexDb && typeof indexDb.prepare === 'function' ? indexDb : db;
-    }
-
-    databaseForKey(key) {
-        return typeof key === 'string' && key.startsWith('manage@index') ? this.indexDb : this.db;
     }
 }
 
@@ -27,7 +21,7 @@ D1Database.prototype.putFile = function(fileId, value, options) {
     // 从metadata中提取字段用于索引
     var extractedFields = this.extractMetadataFields(metadata);
     
-    var stmt = this.databaseForKey(fileId).prepare(
+    var stmt = this.db.prepare(
         'INSERT OR REPLACE INTO files (' +
         'id, value, metadata, file_name, file_type, file_size, ' +
         'upload_ip, upload_address, list_type, timestamp, ' +
@@ -62,7 +56,8 @@ D1Database.prototype.putFile = function(fileId, value, options) {
  * 获取文件记录 (替代 KV.get)
  */
 D1Database.prototype.getFile = function(fileId) {
-    var stmt = this.databaseForKey(fileId).prepare('SELECT * FROM files WHERE id = ?');
+    var self = this;
+    var stmt = this.db.prepare('SELECT * FROM files WHERE id = ?');
     return stmt.bind(fileId).first().then(function(result) {
         if (!result) return null;
         
@@ -84,7 +79,7 @@ D1Database.prototype.getFileWithMetadata = function(fileId) {
  * 删除文件记录 (替代 KV.delete)
  */
 D1Database.prototype.deleteFile = function(fileId) {
-    var stmt = this.databaseForKey(fileId).prepare('DELETE FROM files WHERE id = ?');
+    var stmt = this.db.prepare('DELETE FROM files WHERE id = ?');
     return stmt.bind(fileId).run();
 };
 
@@ -114,7 +109,7 @@ D1Database.prototype.listFiles = function(options) {
     query += ' ORDER BY id LIMIT ?';
     params.push(limit + 1);
     
-    var stmt = this.databaseForKey(prefix).prepare(query);
+    var stmt = this.db.prepare(query);
     if (params.length > 0) {
         stmt = stmt.bind.apply(stmt, params);
     }
@@ -217,7 +212,7 @@ D1Database.prototype.listSettings = function(options) {
  * 保存索引操作记录
  */
 D1Database.prototype.putIndexOperation = function(operationId, operation) {
-    var stmt = this.indexDb.prepare(
+    var stmt = this.db.prepare(
         'INSERT OR REPLACE INTO index_operations (id, type, timestamp, data) VALUES (?, ?, ?, ?)'
     );
     
@@ -233,7 +228,7 @@ D1Database.prototype.putIndexOperation = function(operationId, operation) {
  * 获取索引操作记录
  */
 D1Database.prototype.getIndexOperation = function(operationId) {
-    var stmt = this.indexDb.prepare('SELECT * FROM index_operations WHERE id = ?');
+    var stmt = this.db.prepare('SELECT * FROM index_operations WHERE id = ?');
     return stmt.bind(operationId).first().then(function(result) {
         if (!result) return null;
         
@@ -249,7 +244,7 @@ D1Database.prototype.getIndexOperation = function(operationId) {
  * 删除索引操作记录
  */
 D1Database.prototype.deleteIndexOperation = function(operationId) {
-    var stmt = this.indexDb.prepare('DELETE FROM index_operations WHERE id = ?');
+    var stmt = this.db.prepare('DELETE FROM index_operations WHERE id = ?');
     return stmt.bind(operationId).run();
 };
 
@@ -272,7 +267,7 @@ D1Database.prototype.listIndexOperations = function(options) {
     query += ' ORDER BY timestamp LIMIT ?';
     params.push(limit);
     
-    var stmt = this.indexDb.prepare(query);
+    var stmt = this.db.prepare(query);
     if (params.length > 0) {
         stmt = stmt.bind.apply(stmt, params);
     }
@@ -309,8 +304,8 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
         channel: metadata.Channel || null,
         channelName: metadata.ChannelName || null,
         tgFileId: metadata.TgFileId || null,
-        tgChatId: metadata.TgChatId || null,
-        tgBotToken: metadata.TgBotToken || null,
+        tgChatId: null,
+        tgBotToken: null,
         isChunked: metadata.IsChunked || false
     };
 };
@@ -323,12 +318,14 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
 D1Database.prototype.put = function(key, value, options) {
     options = options || {};
 
-    if (key.startsWith('manage@sysConfig@')) {
-        return this.putSetting(key, value);
-    } else if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         var operation = JSON.parse(value);
         return this.putIndexOperation(operationId, operation);
+    } else if (key.startsWith('manage@')) {
+        // 所有 manage@ 前缀的键统一存入 settings 表
+        var category = key.split('@')[1] || '';
+        return this.putSetting(key, value, category);
     } else {
         return this.putFile(key, value, options);
     }
@@ -340,13 +337,13 @@ D1Database.prototype.put = function(key, value, options) {
 D1Database.prototype.get = function(key) {
     var self = this;
 
-    if (key.startsWith('manage@sysConfig@')) {
-        return this.getSetting(key);
-    } else if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         return this.getIndexOperation(operationId).then(function(operation) {
             return operation ? JSON.stringify(operation) : null;
         });
+    } else if (key.startsWith('manage@')) {
+        return this.getSetting(key);
     } else {
         return this.getFile(key).then(function(file) {
             return file ? file.value : null;
@@ -360,7 +357,7 @@ D1Database.prototype.get = function(key) {
 D1Database.prototype.getWithMetadata = function(key) {
     var self = this;
 
-    if (key.startsWith('manage@sysConfig@')) {
+    if (key.startsWith('manage@')) {
         return this.getSetting(key).then(function(value) {
             return value ? { value: value, metadata: {} } : null;
         });
@@ -373,11 +370,11 @@ D1Database.prototype.getWithMetadata = function(key) {
  * 通用的delete方法
  */
 D1Database.prototype.delete = function(key) {
-    if (key.startsWith('manage@sysConfig@')) {
-        return this.deleteSetting(key);
-    } else if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         return this.deleteIndexOperation(operationId);
+    } else if (key.startsWith('manage@')) {
+        return this.deleteSetting(key);
     } else {
         return this.deleteFile(key);
     }
@@ -391,9 +388,7 @@ D1Database.prototype.list = function(options) {
     var prefix = options.prefix || '';
     var self = this;
 
-    if (prefix.startsWith('manage@sysConfig@')) {
-        return this.listSettings(options);
-    } else if (prefix.startsWith('manage@index@operation_')) {
+    if (prefix.startsWith('manage@index@operation_')) {
         return this.listIndexOperations(options).then(function(operations) {
             var keys = operations.map(function(op) {
                 return {
@@ -402,6 +397,8 @@ D1Database.prototype.list = function(options) {
             });
             return { keys: keys };
         });
+    } else if (prefix.startsWith('manage@')) {
+        return this.listSettings(options);
     } else {
         return this.listFiles(options);
     }

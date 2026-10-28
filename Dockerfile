@@ -1,4 +1,16 @@
-FROM node:22-slim
+FROM node:22-slim AS dependencies
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY deploy/profiles ./deploy/profiles
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
+    npm ci --workspace=@cloudflare-imgbed/common --workspace=@cloudflare-imgbed/server --omit=dev && \
+    rm -rf /root/.npm /var/lib/apt/lists/* /tmp/*
+
+FROM node:22-slim AS runtime
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
@@ -6,9 +18,15 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY . .
+ENV NODE_ENV=production
 
-RUN npm install
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY package.json ./
+COPY deploy/profiles ./deploy/profiles
+COPY frontend-dist ./frontend-dist
+COPY functions ./functions
+COPY database ./database
+COPY deploy/server ./deploy/server
 
 EXPOSE 8080
-CMD ["npm", "run", "start"]
+CMD ["node", "--import", "./deploy/server/register.mjs", "deploy/server/index.js"]
