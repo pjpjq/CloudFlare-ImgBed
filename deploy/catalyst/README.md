@@ -1,4 +1,4 @@
-# Catalyst 上传计算（开发验收版，未部署生产）
+# Catalyst 上传计算（原存储与双 D1 不变）
 
 图片字节：auto-trade → Catalyst Advanced I/O → **原 Telegram / R2 / S3 等渠道**。
 元数据：Catalyst → CF `/api/uploadRelay/*` → 原 `img_d1`、`img_index`。
@@ -7,7 +7,8 @@
 
 ## 1. 前置检查与额度门槛
 
-以下命令是**后续开发部署说明，本次没有执行部署、远端迁移或生产配置写入**。
+**2026-10-29 状态：** 已发布既有 Pages 的生产元数据 API 与 Catalyst Development 函数，未启用 Catalyst Production。仅本机客户端及持久恢复进程已切流，远端交易主服务未重启。
+当日实测 JPEG、17,743,926 字节 BMP 分片及整图 SHA256、幂等重放、索引队列登记和 3 条旧链接通过；JPEG 沿用 Telegram 默认压缩。以下为独立开发项目参考命令，真实 CPU 降幅与学生余额尚未验收。
 使用已经登录的 Catalyst CLI 1.29+、受支持且已打补丁的 Node 24；本地隔离构建验证版本为 24.22.1。
 本机默认 Node 26.8.1 会触发已安装 CLI 的安全警告；部署前先把打补丁的 Node 24 放到当前进程 PATH，不修改全局运行时、不忽略警告。
 在现有组织的独立开发项目操作，不新开付费账号、不启用 Production。
