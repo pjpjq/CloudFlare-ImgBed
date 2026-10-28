@@ -100,7 +100,8 @@ export function createGateway({ env = process.env, relay, upload, allowLocalHttp
             if (Buffer.byteLength(env.CATALYST_UPLOAD_TOKEN || '') < 32 || Buffer.byteLength(env.CATALYST_RELAY_SECRET || '') < 32) {
                 fail(404, 'disabled');
             }
-            if (!timingSafeEqualStr(request.headers.get('Authorization'), `Bearer ${env.CATALYST_UPLOAD_TOKEN}`)) fail(401, 'unauthorized');
+            // Catalyst reserves Authorization for its own OAuth tokens.
+            if (!timingSafeEqualStr(request.headers.get('X-Upload-Token'), env.CATALYST_UPLOAD_TOKEN)) fail(401, 'unauthorized');
             if (request.method !== 'POST') fail(405, 'method_not_allowed');
             return await runWithDeadline(async signal => {
                 const action = new URL(request.url).searchParams.get('action') || 'upload';

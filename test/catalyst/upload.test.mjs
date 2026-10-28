@@ -28,7 +28,7 @@ function request(action = 'upload', body, options = {}) {
         body.append('manifest', JSON.stringify(actual));
     }
     return new Request('https://gateway.test/server/imgbed_upload/execute?action=' + action, {
-        method: 'POST', headers: { Authorization: `Bearer ${env.CATALYST_UPLOAD_TOKEN}`,
+        method: 'POST', headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN,
             ...(action === 'upload' ? { 'Idempotency-Key': options.id || identity.uploadId } : { 'Content-Type': 'application/json' }) },
         body: action === 'upload' ? body : JSON.stringify(body),
     });
@@ -79,8 +79,12 @@ function fixture(options = {}) {
 test('gateway authenticates before parsing body or touching storage/CF', async () => {
     const f = fixture();
     const input = request();
-    input.headers.set('Authorization', 'Bearer wrong');
+    input.headers.set('X-Upload-Token', 'wrong');
     assert.equal((await f.gateway(input)).status, 401);
+    const oauthOnly = request();
+    oauthOnly.headers.delete('X-Upload-Token');
+    oauthOnly.headers.set('Authorization', `Bearer ${env.CATALYST_UPLOAD_TOKEN}`);
+    assert.equal((await f.gateway(oauthOnly)).status, 401);
     assert.equal(f.calls.length, 0);
     assert.equal(f.uploads, 0);
 });
@@ -320,7 +324,7 @@ function partRequest(data, index, uploadId, totalSize) {
     form.append('manifest', JSON.stringify({ ...manifest, uploadId, fileSize: totalSize, index,
         sha256: computeChunkHash(data) }));
     return new Request('https://gateway.test/execute?action=part', { method: 'POST', body: form,
-        headers: { Authorization: `Bearer ${env.CATALYST_UPLOAD_TOKEN}`, 'Idempotency-Key': uploadId } });
+        headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN, 'Idempotency-Key': uploadId } });
 }
 function computeChunkHash(data) {
     return createRequire(process.cwd() + '/hash-test.cjs')('node:crypto').createHash('sha256').update(data).digest('hex');

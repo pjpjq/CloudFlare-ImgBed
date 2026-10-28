@@ -153,6 +153,7 @@ catalyst serve --only functions:imgbed_upload
 
 `catalyst-config.json` 的私有 env overlay 仅在本次 staging 中，禁止复制到仓库或发布日志。
 覆盖构建会清空 overlay，故必须先构建再注入密钥。auto-trade **只读客户端 token，不接触 service HMAC key**。
+客户端 token 使用 `X-Upload-Token` 请求头；`Authorization` 被 Catalyst 平台保留用于 OAuth，不能复用。
 如走 R2，注入 `R2_ENDPOINT/R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY`，限制到原桶；不使用临时本地文件系统当存储。
 可通过 `CATALYST_UPLOAD_CHANNEL` 明确选择 `telegram/cfr2/s3/discord/huggingface/webdav`，以及可选渠道名；未设置时选第一个有启用渠道的类型。
 配置由 CF 当前渠道读取，保留现有容量过滤、IP 查询/审查设置，不自动启用遥测或新审查。
