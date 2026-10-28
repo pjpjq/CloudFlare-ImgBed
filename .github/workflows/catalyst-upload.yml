@@ -1,0 +1,58 @@
+name: Catalyst upload compatibility
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['deploy/catalyst/**', 'functions/**', 'database/**', 'test/**', 'package*.json', '.github/workflows/catalyst-upload.yml']
+  push:
+    branches: [main, codex/catalyst-upload]
+    paths: ['deploy/catalyst/**', 'functions/**', 'database/**', 'test/**', 'package*.json', '.github/workflows/catalyst-upload.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      NODE_IMAGE: node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Prepare locked dependencies without lifecycle scripts
+        run: |
+          set -eu
+          docker pull "$NODE_IMAGE"
+          DEPS="$RUNNER_TEMP/catalyst-dependencies"
+          mkdir -p "$DEPS/deploy"
+          cp package.json package-lock.json "$DEPS/"
+          cp -R deploy/profiles "$DEPS/deploy/"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1024m --cpus 1 --pids-limit 96 --ulimit fsize=268435456 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=128m --volume "$DEPS:/scratch:rw" \
+            --workdir /scratch --entrypoint /usr/bin/env "$NODE_IMAGE" -i \
+            HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin NPM_CONFIG_CACHE=/tmp/npm \
+            /usr/bin/timeout --signal=KILL 240 npm ci --ignore-scripts --no-audit --no-fund
+          test "$(du -sm "$DEPS" | cut -f1)" -lt 900
+      - name: Run offline upload, dual D1, old-link and rollback checks
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1024m --cpus 1 --pids-limit 96 \
+            --ulimit cpu=120:125 --ulimit fsize=268435456 --ulimit nofile=256:256 \
+            --tmpfs /scratch:rw,nosuid,size=800m --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            --volume "$PWD:/source:ro" --volume "$RUNNER_TEMP/catalyst-dependencies:/dependencies:ro" \
+            --workdir /scratch --entrypoint /usr/bin/env "$NODE_IMAGE" -i \
+            HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin TZ=UTC LC_ALL=C.UTF-8 \
+            /usr/bin/timeout --signal=KILL 180 /bin/sh -ec '
+              mkdir /scratch/project
+              cp -R /source/functions /source/database /source/deploy /source/test /scratch/project/
+              cp /source/package.json /source/package-lock.json /scratch/project/
+              cd /scratch/project
+              ln -s /dependencies/node_modules node_modules
+              CATALYST_BUILD_TESTS=1 node deploy/catalyst/build.mjs
+              node --test --test-concurrency=1 deploy/catalyst/build/catalyst-tests.cjs
+              node --test --test-concurrency=1 test/uploadRegistration.test.mjs test/d1DatabaseShard.test.mjs test/indexManagerChunk.test.mjs test/telemetryDisabled.test.mjs
+              node node_modules/esbuild/bin/esbuild "functions/api/uploadRelay/[[action]].js" --bundle --platform=browser --format=esm --outfile=/scratch/relay.mjs
+            '

@@ -27,7 +27,7 @@ npm test -- test/update.test.js
 npm test -- test/update.test.js --grep "rename"
 ```
 
-The current Mocha entry point automatically loads `.js` test files directly inside `test/`. Files in `helpers/` are not standalone suites; `smoke/serverImports.mjs` runs separately through `npm run test:server`. When adding suites in subdirectories, update test discovery and confirm CI finds them.
+The current Mocha entry point automatically loads its supported extensions (`.js`, `.cjs`, `.mjs`) directly inside `test/`. Files in `helpers/` are not standalone suites; `smoke/serverImports.mjs` runs separately through `npm run test:server`. The bundle-only Catalyst suite lives under `test/catalyst/` so Mocha does not load it unbundled. When adding suites in subdirectories, update test discovery and confirm CI finds them.
 
 ## Module overview
 
@@ -96,3 +96,12 @@ The runner reports test counts; this document maintains functional scope rather 
 ### Fork compatibility
 
 `node --test test/d1DatabaseShard.test.mjs test/indexManagerChunk.test.mjs test/telemetryDisabled.test.mjs` runs dependency-free fork checks separately from the upstream Mocha suite. `.github/workflows/fork-regression.yml` runs them in CI. They cover the optional `img_index` binding, legacy index records in its `files` table, index-operation routing, primary settings, the upstream D1 chunk size, and disabled telemetry configuration. They do not measure production CPU time or test live storage channels.
+
+`node --test test/uploadRegistration.test.mjs` additionally exercises the metadata-only upload relay using Node's built-in SQLite (Node 22.13+). It covers request signatures and body limits, primary/index D1 separation, legacy record preservation, receipt durability after index failure, concurrent callbacks, replay, and credential removal. It does not upload files to real providers or establish Catalyst runtime limits. The isolated fixture applies `database/upload-relay.sql` only to its in-memory primary database; no production migration is run.
+
+### Catalyst upload compute
+
+With locked dependencies and Node 24, run `CATALYST_BUILD_TESTS=1 node deploy/catalyst/build.mjs`, then `node --test deploy/catalyst/build/catalyst-tests.cjs`. This separately bundled suite uses only Catalyst-scoped adapters, with the unmodified upstream handler performing Telegram/R2 uploads against storage doubles. It verifies Unicode content IDs, original bucket/key and chunk metadata, auth-before-body, durable signed receipts, replay without provider reupload, a real HMAC relay into both SQLite-backed D1 adapters, index-failure recovery, reading old/new `/file/` through the real file route, and the native req/res export over isolated loopback HTTP. No account credentials, live providers or production state are used.
+The suite also checks resumable Telegram uploads spanning invocation deadlines, lost part-ACK recovery, original photo-to-document retries and channel load balancing, upload IP blocking, private S3/WebDAV/HuggingFace LFS staging and moderation recovery, and exact PNG/GIF/WebP bytes through Discord and the original reader. The relay suite rejects staged storage conflicts and preserves colliding legacy rows with empty or JSON-null metadata. `.github/workflows/catalyst-upload.yml` prepares locked dependencies with lifecycle scripts disabled, then runs these checks and a browser-target CF relay bundle offline with no account secrets.
+
+Limits: tests do not establish production CPU savings, current student credits, physical exactly-once provider writes, every channel's remote behavior, or slow large-file completion within the AIO deadline. See `deploy/catalyst/README.md` for explicit development-only deployment and rollback gates. The bundled Catalyst suite runs separately; root-level `.mjs` fork checks can also be discovered by Mocha and have independent `node --test` commands above.
