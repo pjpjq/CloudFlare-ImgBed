@@ -111,7 +111,7 @@ import { writeFileSync } from 'node:fs';
 const client = randomBytes(32).toString('hex');
 const service = randomBytes(32).toString('hex');
 writeFileSync(`${process.env.PRIVATE}/catalyst.env`,
-  `CATALYST_UPLOAD_TOKEN=${client}\nCATALYST_RELAY_SECRET=${service}\nCF_IMGBED_URL=${process.env.CF_IMGBED_URL}\n`, { mode: 0o600, flag: 'wx' });
+  `IMGBED_UPLOAD_TOKEN=${client}\nIMGBED_RELAY_SECRET=${service}\nCF_IMGBED_URL=${process.env.CF_IMGBED_URL}\n`, { mode: 0o600, flag: 'wx' });
 writeFileSync(`${process.env.PRIVATE}/auto-trade.env`,
   `CATALYST_UPLOAD_TOKEN=${client}\nCF_IMGBED_URL=${process.env.CF_IMGBED_URL}\n`, { mode: 0o600, flag: 'wx' });
 JS
@@ -123,7 +123,7 @@ cd "$IMGBED_REPO"
 # 先另行备份开发双库。仅 PRIMARY 增加四张小表；不改 files/settings/索引表。
 wrangler d1 execute "$CF_DEV_PRIMARY" --remote --file database/upload-relay.sql
 # 密钥通过 stdin，禁止 set -x、echo、提交 env 或 catalyst-debug.log。
-node -e 'process.stdout.write(process.env.CATALYST_RELAY_SECRET)' |
+node -e 'process.stdout.write(process.env.IMGBED_RELAY_SECRET)' |
   wrangler pages secret put CATALYST_RELAY_SECRET --project-name "$CF_DEV_PROJECT"
 # 独立开发 Pages 项目须已绑定原有 schema 的 img_d1 和 img_index。
 wrangler pages deploy frontend-dist --project-name "$CF_DEV_PROJECT"
@@ -141,9 +141,9 @@ node --input-type=module - "$STAGING/functions/imgbed_upload/catalyst-config.jso
 import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
 const file = process.argv[2];
 const config = JSON.parse(readFileSync(file, 'utf8'));
-const names = ['CATALYST_UPLOAD_TOKEN','CATALYST_RELAY_SECRET','CF_IMGBED_URL',
+const names = ['IMGBED_UPLOAD_TOKEN','IMGBED_RELAY_SECRET','CF_IMGBED_URL',
   'R2_ENDPOINT','R2_BUCKET','R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY',
-  'CATALYST_UPLOAD_CHANNEL','CATALYST_UPLOAD_CHANNEL_NAME'];
+  'IMGBED_UPLOAD_CHANNEL','IMGBED_UPLOAD_CHANNEL_NAME'];
 config.deployment.env_variables = Object.fromEntries(names.filter(name => process.env[name]).map(name => [name, process.env[name]]));
 writeFileSync(file, JSON.stringify(config, null, 2), { mode: 0o600 });
 chmodSync(file, 0o600);
@@ -153,8 +153,10 @@ catalyst serve --only functions:imgbed_upload
 
 `catalyst-config.json` 的私有 env overlay 仅在本次 staging 中，禁止复制到仓库或发布日志。
 覆盖构建会清空 overlay，故必须先构建再注入密钥。auto-trade **只读客户端 token，不接触 service HMAC key**。
+客户端 token 使用 `X-Upload-Token` 请求头；`Authorization` 被 Catalyst 平台保留用于 OAuth，不能复用。
+Catalyst 函数环境使用 `IMGBED_*`，由原生入口映射到内部配置；CF HMAC 及客户端环境变量名称不变，避免平台更新时拒绝 `CATALYST_*` 保留前缀。
 如走 R2，注入 `R2_ENDPOINT/R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY`，限制到原桶；不使用临时本地文件系统当存储。
-可通过 `CATALYST_UPLOAD_CHANNEL` 明确选择 `telegram/cfr2/s3/discord/huggingface/webdav`，以及可选渠道名；未设置时选第一个有启用渠道的类型。
+可通过 `IMGBED_UPLOAD_CHANNEL` 明确选择 `telegram/cfr2/s3/discord/huggingface/webdav`，以及可选 `IMGBED_UPLOAD_CHANNEL_NAME`；未设置时选第一个有启用渠道的类型。
 配置由 CF 当前渠道读取，保留现有容量过滤、IP 查询/审查设置，不自动启用遥测或新审查。
 
 ## 4. 开发部署与客户端接入

@@ -28,7 +28,7 @@ function request(action = 'upload', body, options = {}) {
         body.append('manifest', JSON.stringify(actual));
     }
     return new Request('https://gateway.test/server/imgbed_upload/execute?action=' + action, {
-        method: 'POST', headers: { Authorization: `Bearer ${env.CATALYST_UPLOAD_TOKEN}`,
+        method: 'POST', headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN,
             ...(action === 'upload' ? { 'Idempotency-Key': options.id || identity.uploadId } : { 'Content-Type': 'application/json' }) },
         body: action === 'upload' ? body : JSON.stringify(body),
     });
@@ -79,8 +79,12 @@ function fixture(options = {}) {
 test('gateway authenticates before parsing body or touching storage/CF', async () => {
     const f = fixture();
     const input = request();
-    input.headers.set('Authorization', 'Bearer wrong');
+    input.headers.set('X-Upload-Token', 'wrong');
     assert.equal((await f.gateway(input)).status, 401);
+    const oauthOnly = request();
+    oauthOnly.headers.delete('X-Upload-Token');
+    oauthOnly.headers.set('Authorization', `Bearer ${env.CATALYST_UPLOAD_TOKEN}`);
+    assert.equal((await f.gateway(oauthOnly)).status, 401);
     assert.equal(f.calls.length, 0);
     assert.equal(f.uploads, 0);
 });
@@ -291,7 +295,8 @@ test('R2 uses the existing bucket and identical stable object key via S3, never 
 });
 
 test('built Advanced I/O entry exports native req/res handler and denies unauthenticated HTTP', async t => {
-    Object.assign(process.env, env);
+    Object.assign(process.env, { CF_IMGBED_URL: env.CF_IMGBED_URL,
+        IMGBED_UPLOAD_TOKEN: env.CATALYST_UPLOAD_TOKEN, IMGBED_RELAY_SECRET: env.CATALYST_RELAY_SECRET });
     const require = createRequire(process.cwd() + '/test-entry.cjs');
     const handler = require(process.cwd() + '/deploy/catalyst/build/functions/imgbed_upload/index.cjs');
     assert.equal(typeof handler, 'function');
@@ -300,6 +305,9 @@ test('built Advanced I/O entry exports native req/res handler and denies unauthe
     try {
         const response = await fetch(`http://127.0.0.1:${server.address().port}/execute`, { method: 'POST', body: 'not-an-image' });
         assert.equal(response.status, 401);
+        const authenticated = await fetch(`http://127.0.0.1:${server.address().port}/execute`, {
+            method: 'POST', headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN }, body: 'not-an-image' });
+        assert.equal(authenticated.status, 415);
     } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
@@ -320,7 +328,7 @@ function partRequest(data, index, uploadId, totalSize) {
     form.append('manifest', JSON.stringify({ ...manifest, uploadId, fileSize: totalSize, index,
         sha256: computeChunkHash(data) }));
     return new Request('https://gateway.test/execute?action=part', { method: 'POST', body: form,
-        headers: { Authorization: `Bearer ${env.CATALYST_UPLOAD_TOKEN}`, 'Idempotency-Key': uploadId } });
+        headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN, 'Idempotency-Key': uploadId } });
 }
 function computeChunkHash(data) {
     return createRequire(process.cwd() + '/hash-test.cjs')('node:crypto').createHash('sha256').update(data).digest('hex');
