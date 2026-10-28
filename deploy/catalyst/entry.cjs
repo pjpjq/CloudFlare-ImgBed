@@ -1,5 +1,11 @@
 const { createGateway } = require('./gateway.mjs');
-const gateway = createGateway();
+// Keep platform-reserved CATALYST_* names out of deployed environment variables.
+const gateway = createGateway({ env: { ...process.env,
+    CATALYST_UPLOAD_TOKEN: process.env.IMGBED_UPLOAD_TOKEN,
+    CATALYST_RELAY_SECRET: process.env.IMGBED_RELAY_SECRET,
+    CATALYST_UPLOAD_CHANNEL: process.env.IMGBED_UPLOAD_CHANNEL,
+    CATALYST_UPLOAD_CHANNEL_NAME: process.env.IMGBED_UPLOAD_CHANNEL_NAME,
+} });
 
 module.exports = async (req, res) => {
     try {

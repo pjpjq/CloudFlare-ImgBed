@@ -295,7 +295,8 @@ test('R2 uses the existing bucket and identical stable object key via S3, never 
 });
 
 test('built Advanced I/O entry exports native req/res handler and denies unauthenticated HTTP', async t => {
-    Object.assign(process.env, env);
+    Object.assign(process.env, { CF_IMGBED_URL: env.CF_IMGBED_URL,
+        IMGBED_UPLOAD_TOKEN: env.CATALYST_UPLOAD_TOKEN, IMGBED_RELAY_SECRET: env.CATALYST_RELAY_SECRET });
     const require = createRequire(process.cwd() + '/test-entry.cjs');
     const handler = require(process.cwd() + '/deploy/catalyst/build/functions/imgbed_upload/index.cjs');
     assert.equal(typeof handler, 'function');
@@ -304,6 +305,9 @@ test('built Advanced I/O entry exports native req/res handler and denies unauthe
     try {
         const response = await fetch(`http://127.0.0.1:${server.address().port}/execute`, { method: 'POST', body: 'not-an-image' });
         assert.equal(response.status, 401);
+        const authenticated = await fetch(`http://127.0.0.1:${server.address().port}/execute`, {
+            method: 'POST', headers: { 'X-Upload-Token': env.CATALYST_UPLOAD_TOKEN }, body: 'not-an-image' });
+        assert.equal(authenticated.status, 415);
     } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
