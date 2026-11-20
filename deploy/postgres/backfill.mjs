@@ -18,6 +18,7 @@ const tables = Object.fromEntries(Object.entries({
 const state = 'public._imgbed_d1_backfill';
 const lockId = '531027942726303185';
 const env = process.env;
+const maxPageSize = 2_000;
 
 class BackfillError extends Error {}
 class BackfillConnectionError extends BackfillError {}
@@ -240,13 +241,14 @@ async function main() {
         console.log('Source: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_D1_DATABASE_ID, CLOUDFLARE_API_TOKEN (D1 Read),'
             + ' or MIGRATION_SOURCE_SQLITE for a local fixture.');
         console.log('Apply/verify: MIGRATION_DATABASE_URL, MIGRATION_EXPECTED_DATABASE (imgbed_<suffix>).'
-            + ' Optional MIGRATION_PAGE_SIZE (1-500, default 100).');
+            + ` Optional MIGRATION_PAGE_SIZE (1-${maxPageSize}, default 100).`);
         return;
     }
     requireValue(process.argv.length <= 3 && ['--dry-run', '--apply', '--verify'].includes(mode),
         'use --dry-run, --apply or --verify');
     const limit = Number(env.MIGRATION_PAGE_SIZE ?? 100);
-    requireValue(Number.isInteger(limit) && limit >= 1 && limit <= 500, 'MIGRATION_PAGE_SIZE must be 1–500');
+    requireValue(Number.isInteger(limit) && limit >= 1 && limit <= maxPageSize,
+        `MIGRATION_PAGE_SIZE must be 1–${maxPageSize}`);
     const target = mode !== '--dry-run' ? targetSettings() : null;
     phase = 'opening source';
     const source = await openSource();
