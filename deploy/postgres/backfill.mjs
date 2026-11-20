@@ -20,6 +20,7 @@ const lockId = '531027942726303185';
 const env = process.env;
 
 class BackfillError extends Error {}
+class BackfillConnectionError extends BackfillError {}
 function requireValue(value, message) {
     if (!value) throw new BackfillError(message);
     return value;
@@ -250,6 +251,7 @@ async function main() {
     phase = 'opening source';
     const source = await openSource();
     let client;
+    let disconnected = false;
     try {
         if (!env.MIGRATION_SOURCE_SQLITE && target) {
             console.log('D1 pagination is not a snapshot; keep writers frozen for the final verified apply and cutover.');
@@ -265,7 +267,9 @@ async function main() {
 
         phase = 'checking isolated PostgreSQL target';
         const { Client } = await import('pg');
-        client = new Client({ connectionString: target.connectionString, connectionTimeoutMillis: 10_000 });
+        client = new Client({ connectionString: target.connectionString, connectionTimeoutMillis: 10_000,
+            keepAlive: true, keepAliveInitialDelayMillis: 10_000 });
+        client.on('error', () => { disconnected = true; });
         await client.connect();
         const { rows: [identity] } = await client.query(`SELECT pg_catalog.current_database() AS db,
             pg_catalog.current_setting('server_encoding') AS encoding`);
@@ -296,6 +300,12 @@ async function main() {
                 console.log(`${table}: verified ${copied.count} rows (digest matched)`);
             }
         }, 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    } catch (error) {
+        if (!(error instanceof BackfillError) && (disconnected || /^(?:08\w{3}|57P0[123]|ECONNRESET|EPIPE|ETIMEDOUT)$/.test(error?.code)
+            || error?.message === 'Connection terminated unexpectedly')) {
+            throw new BackfillConnectionError('PostgreSQL connection lost; rerun with the same source and target to resume');
+        }
+        throw error;
     } finally {
         try {
             if (client) await client.end();
@@ -310,5 +320,5 @@ main().catch(error => {
     // Provider error text, raw rows, cursor values, and connection details may contain secrets.
     const code = /^[0-9A-Z_]{2,40}$/.test(error?.code || '') ? ` (${error.code})` : '';
     console.error(`Backfill stopped while ${phase}: ${error instanceof BackfillError ? error.message : `operation failed${code}`}`);
-    process.exitCode = 1;
+    process.exitCode = error instanceof BackfillConnectionError ? 75 : 1;
 });
