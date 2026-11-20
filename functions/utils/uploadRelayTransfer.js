@@ -1,3 +1,4 @@
+import { getPrimaryDatabase } from './databaseAdapter.js';
 import { validateUploadIdentity } from './uploadRegistration.js';
 import { cleanRelayMetadata } from './uploadRelayMetadata.js';
 import { UploadRelayError } from './uploadRelayAuth.js';
@@ -7,7 +8,7 @@ const reject = code => { throw new UploadRelayError(409, code); };
 
 export async function getUploadTransfer(env, payload) {
     validateUploadIdentity(payload.uploadId, payload.fileId);
-    const row = await env.img_d1.prepare('SELECT * FROM upload_relay_transfers WHERE upload_id = ?')
+    const row = await getPrimaryDatabase(env).prepare('SELECT * FROM upload_relay_transfers WHERE upload_id = ?')
         .bind(payload.uploadId).first();
     if (!row) return { state: 'missing' };
     if (row.file_id !== payload.fileId) reject('transfer_conflict');
@@ -31,7 +32,7 @@ export async function beginUploadTransfer(env, payload, now = Date.now()) {
         metadata: cleanRelayMetadata(input.metadata) };
     const serialized = JSON.stringify(manifest);
     if (new TextEncoder().encode(serialized).byteLength > 8192) throw new UploadRelayError(413, 'metadata_too_large');
-    await env.img_d1.prepare('INSERT OR IGNORE INTO upload_relay_transfers ' +
+    await getPrimaryDatabase(env).prepare('INSERT OR IGNORE INTO upload_relay_transfers ' +
         '(upload_id, file_id, manifest, created_at) VALUES (?, ?, ?, ?)')
         .bind(payload.uploadId, payload.fileId, serialized, now).run();
     const saved = await getUploadTransfer(env, payload);
@@ -75,7 +76,7 @@ export async function checkpointUploadPart(env, payload) {
         return saved;
     }
     if (parts.length !== part.index) throw new UploadRelayError(409, 'part_out_of_order', 1);
-    await env.img_d1.prepare("UPDATE upload_relay_transfers SET parts = json_insert(parts, '$[#]', json(?)) " +
+    await getPrimaryDatabase(env).prepare("UPDATE upload_relay_transfers SET parts = json_insert(parts, '$[#]', json(?)) " +
         'WHERE upload_id = ? AND json_array_length(parts) = ?')
         .bind(JSON.stringify(clean), payload.uploadId, part.index).run();
     const winner = await getUploadTransfer(env, payload);

@@ -12,7 +12,7 @@ Use Node.js 22 and the repository's existing Mocha setup from the main repositor
 npm ci
 npm test
 npm run test:server
-npx --no-install wrangler pages functions build functions --outdir data/ci-pages-build
+npx --no-install wrangler pages functions build functions --compatibility-date=2024-09-23 --compatibility-flag=nodejs_compat --outdir data/ci-pages-build
 ```
 
 `npm test` requires neither a running server nor cloud credentials. Tests use isolated in-memory databases and storage doubles. They do not read or write application data in `data/` or contact real storage services.
@@ -43,6 +43,7 @@ The current Mocha entry point automatically loads its supported extensions (`.js
 | AI tags | [ai.test.js](ai.test.js) | `api/manage/ai/tags.js` | Original formats, preview-type normalization, signatures and size limits; AI invocation only for valid input |
 | Shared file-type rules | [fileTypes.test.js](fileTypes.test.js) | `utils/mimeTypes.js` | MIME normalization, case-sensitive parameters, explicit-type precedence, extension inference, unknown/ambiguous extensions and random-image keywords versus strict classification |
 | Deployment runtime | [runtime.test.js](runtime.test.js) | `_middleware.js`, `api/userConfig.js` | Pages default and Node/Worker adapter markers; configured environment values cannot override the platform; frontend runtime field |
+| PostgreSQL primary | [postgresD1.test.mjs](postgresD1.test.mjs), [postgresRelayLease.test.mjs](postgresRelayLease.test.mjs) | `utils/postgresD1.js`, `utils/uploadRelayLease.js`, `utils/uploadRegistration.js` | SQL and binding compatibility; opt-in PostgreSQL claims, chunk and registration replay, separate SQLite index, unchanged R2 path and denied access on a PG settings error |
 | Server imports | [smoke/serverImports.mjs](smoke/serverImports.mjs) | Main routes above and `functions/dav/` | Unmodified route imports and handler exports through the production loader |
 
 Business paths in the table are relative to `functions/`, except those already starting with `functions/`. Extend the relevant suite when changing one feature. A substantial independent feature can have its own module; add its entry points, scope and boundaries here instead of accumulating unrelated behavior in one file.
@@ -57,6 +58,8 @@ Business paths in the table are relative to `functions/`, except those already s
 - Storage requests, cache invalidation and AI calls use doubles. There are no live cloud end-to-end tests, complete Docker image startup checks, browser UI tests or production Cloudflare deployment checks.
 
 Keep gaps explicit here until the corresponding tests exist. Passing CI does not establish that every basic capability has been verified.
+
+To run the opt-in PostgreSQL cases, set `IMGBED_TEST_POSTGRES_URL` to a disposable test database and run `node --test test/postgresD1.test.mjs test/postgresRelayLease.test.mjs`. The integration tests create and remove their own schema. They do not test live Hyperdrive or Northflank connectivity.
 
 ## Helpers and isolation boundaries
 

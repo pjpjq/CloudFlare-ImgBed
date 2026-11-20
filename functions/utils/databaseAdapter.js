@@ -4,6 +4,18 @@
  */
 
 import { ShardedD1Database } from './shardedD1Database.js';
+import { PostgresD1 } from './postgresD1.js';
+
+export function getPrimaryDatabase(env) {
+    if (env.IMG_PRIMARY_PG !== undefined) {
+        const connectionString = env.IMG_PRIMARY_PG?.connectionString;
+        if (typeof connectionString !== 'string' || !connectionString || typeof env.img_index?.prepare !== 'function') {
+            throw new Error('IMG_PRIMARY_PG requires Hyperdrive and a separate img_index D1 binding');
+        }
+        return new PostgresD1(connectionString);
+    }
+    return typeof env.img_d1?.prepare === 'function' ? env.img_d1 : null;
+}
 
 /**
  * 创建数据库适配器
@@ -11,6 +23,9 @@ import { ShardedD1Database } from './shardedD1Database.js';
  * @returns {Object} 数据库适配器实例
  */
 export function createDatabaseAdapter(env) {
+    if (env.IMG_PRIMARY_PG !== undefined) {
+        return new ShardedD1Database(getPrimaryDatabase(env), env.img_index);
+    }
     // 检查是否配置了数据库
     if (env.img_url && typeof env.img_url.get === 'function') {
         // 使用KV存储
@@ -159,7 +174,8 @@ export function getDatabase(env) {
  * @returns {Object} 配置信息
  */
 export function checkDatabaseConfig(env) {
-    var hasD1 = env.img_d1 && typeof env.img_d1.prepare === 'function';
+    // PG retains the SQL-backed storage behavior (notably chunking and index pagination).
+    var hasD1 = Boolean(getPrimaryDatabase(env));
     var hasKV = env.img_url && typeof env.img_url.get === 'function';
 
     return {
