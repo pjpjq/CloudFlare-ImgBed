@@ -17,8 +17,23 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Prepare Node.js runtime
-        run: docker pull node:22-bookworm-slim
+      - name: Prepare locked runtime dependencies without lifecycle scripts
+        run: |
+          set -eu
+          docker pull node:22-bookworm-slim
+          DEPS="$RUNNER_TEMP/fork-dependencies"
+          mkdir -p "$DEPS/deploy"
+          cp package.json package-lock.json "$DEPS/"
+          cp -R deploy/profiles "$DEPS/deploy/"
+          docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --cpus 1 --pids-limit 64 --ulimit fsize=268435456 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=128m --volume "$DEPS:/scratch:rw" \
+            --workdir /scratch --entrypoint /usr/bin/env node:22-bookworm-slim -i \
+            HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin NPM_CONFIG_CACHE=/tmp/npm \
+            /usr/bin/timeout --signal=KILL 180 npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+          test ! -e node_modules
+          test ! -L node_modules
+          mv -T -- "$DEPS/node_modules" node_modules
       - name: Run isolated compatibility checks
         run: |
           docker run --rm --network none --read-only --cap-drop ALL \

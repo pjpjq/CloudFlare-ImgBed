@@ -44,7 +44,7 @@ jobs:
             --tmpfs /scratch:rw,nosuid,size=800m --tmpfs /tmp:rw,noexec,nosuid,size=32m \
             --volume "$PWD:/source:ro" --volume "$RUNNER_TEMP/catalyst-dependencies:/dependencies:ro" \
             --workdir /scratch --entrypoint /usr/bin/env "$NODE_IMAGE" -i \
-            HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin TZ=UTC LC_ALL=C.UTF-8 \
+            HOME=/tmp TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin TZ=UTC LC_ALL=C.UTF-8 WRANGLER_SEND_METRICS=false \
             /usr/bin/timeout --signal=KILL 180 /bin/sh -ec '
               mkdir /scratch/project
               cp -R /source/functions /source/database /source/deploy /source/test /scratch/project/
@@ -54,5 +54,5 @@ jobs:
               CATALYST_BUILD_TESTS=1 node deploy/catalyst/build.mjs
               node --test --test-concurrency=1 deploy/catalyst/build/catalyst-tests.cjs
               node --test --test-concurrency=1 test/uploadRegistration.test.mjs test/d1DatabaseShard.test.mjs test/indexManagerChunk.test.mjs test/telemetryDisabled.test.mjs
-              node node_modules/esbuild/bin/esbuild "functions/api/uploadRelay/[[action]].js" --bundle --platform=browser --format=esm --outfile=/scratch/relay.mjs
+              node node_modules/wrangler/bin/wrangler.js pages functions build functions --compatibility-date=2024-09-23 --compatibility-flag=nodejs_compat --outdir /scratch/pages-build
             '

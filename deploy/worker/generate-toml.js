@@ -62,8 +62,8 @@ if (env.WORKER_VARS) {
 
 let toml = `name = "${name}"
 main = "index.js"
-compatibility_date = "2024-08-21"
-compatibility_flags = ["global_fetch_strictly_public"]
+compatibility_date = "2024-09-23"
+compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 
 [assets]
 directory = "../../frontend-dist"

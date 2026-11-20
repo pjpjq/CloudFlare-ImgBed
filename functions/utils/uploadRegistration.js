@@ -1,4 +1,4 @@
-import { getDatabase } from './databaseAdapter.js';
+import { getDatabase, getPrimaryDatabase } from './databaseAdapter.js';
 import { addFileToIndex } from './indexManager.js';
 import { cleanRelayMetadata } from './uploadRelayMetadata.js';
 import { UploadRelayError } from './uploadRelayAuth.js';
@@ -101,7 +101,7 @@ export async function stageUploadedFile(context, payload) {
     const record = receipt.records[0];
     const metadata = { ...record.metadata, UploadRelayStagedId: receipt.uploadId, UploadRelayStagedFingerprint: source };
     // INSERT-only staging cannot overwrite a legacy file or race a completed registration.
-    await context.env.img_d1.prepare('INSERT OR IGNORE INTO files (id, value, metadata) VALUES (?, ?, ?)')
+    await getPrimaryDatabase(context.env).prepare('INSERT OR IGNORE INTO files (id, value, metadata) VALUES (?, ?, ?)')
         .bind(receipt.fileId, record.value, JSON.stringify(metadata)).run();
     const saved = await getUploadRegistration(context.env, receipt.uploadId, receipt.fileId);
     if (saved.state === 'staged' && await storageFingerprint(validateReceipt(saved.receipt).receipt) !== source) {
@@ -115,9 +115,9 @@ export async function checkpointUploadedFile(context, payload, now = Date.now())
     const { receipt, serialized } = validateReceipt(payload);
     const digest = await fingerprint(serialized);
     const { env } = context;
-    if (!env.img_d1 || !env.img_index) throw new UploadRelayError(503, 'dual_d1_required');
+    const sql = env.img_index && getPrimaryDatabase(env);
+    if (!sql) throw new UploadRelayError(503, 'dual_d1_required');
     const db = getDatabase(env);
-    const sql = env.img_d1;
     let job = await sql.prepare('SELECT * FROM upload_relay_registrations WHERE upload_id = ?')
         .bind(receipt.uploadId).first();
     if (job && (job.fingerprint !== digest || job.file_id !== receipt.fileId)) {
@@ -159,7 +159,7 @@ export async function registerUploadedFile(context, payload, now = Date.now()) {
     const digest = await fingerprint(canonicalJson(receipt));
     const { env } = context;
     const db = getDatabase(env);
-    const sql = env.img_d1;
+    const sql = getPrimaryDatabase(env);
     const owner = crypto.randomUUID();
     const job = await sql.prepare('UPDATE upload_relay_registrations SET lease_owner = ?, lease_until = ? ' +
         'WHERE upload_id = ? AND fingerprint = ? AND lease_until <= ? RETURNING *')
@@ -192,8 +192,9 @@ export async function registerUploadedFile(context, payload, now = Date.now()) {
 
 export async function getUploadRegistration(env, uploadId, fileId) {
     validateUploadIdentity(uploadId, fileId);
-    if (!env.img_d1 || !env.img_index) throw new UploadRelayError(503, 'dual_d1_required');
-    const job = await env.img_d1.prepare('SELECT file_id, receipt FROM upload_relay_registrations WHERE upload_id = ?')
+    const sql = env.img_index && getPrimaryDatabase(env);
+    if (!sql) throw new UploadRelayError(503, 'dual_d1_required');
+    const job = await sql.prepare('SELECT file_id, receipt FROM upload_relay_registrations WHERE upload_id = ?')
         .bind(uploadId).first();
     if (job) {
         if (job.file_id !== fileId) throw new UploadRelayError(409, 'file_id_conflict');

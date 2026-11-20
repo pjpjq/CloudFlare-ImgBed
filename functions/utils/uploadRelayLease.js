@@ -1,4 +1,4 @@
-import { getDatabase } from './databaseAdapter.js';
+import { getDatabase, getPrimaryDatabase } from './databaseAdapter.js';
 import { getUploadRegistration, validateUploadIdentity } from './uploadRegistration.js';
 import { UploadRelayError } from './uploadRelayAuth.js';
 
@@ -11,16 +11,12 @@ function validateJob(payload) {
 
 export async function releaseUploadLease(env, payload) {
     validateJob(payload);
-    await env.img_d1.prepare('DELETE FROM upload_relay_jobs WHERE upload_id = ? AND lease_owner = ?')
+    await getPrimaryDatabase(env).prepare('DELETE FROM upload_relay_jobs WHERE upload_id = ? AND lease_owner = ?')
         .bind(payload.uploadId, payload.owner).run();
     return { released: true };
 }
 
-export async function claimUploadLease(context, payload, now = Date.now(), loadProfile = uploadProfile) {
-    validateJob(payload);
-    const state = await getUploadRegistration(context.env, payload.uploadId, payload.fileId);
-    if (state.state !== 'missing' && state.state !== 'staged') return state;
-    const sql = context.env.img_d1;
+async function acquireUploadLease(sql, payload, now) {
     const current = await sql.prepare('SELECT * FROM upload_relay_jobs WHERE upload_id = ?')
         .bind(payload.uploadId).first();
     if (current && current.lease_until > now && current.lease_owner !== payload.owner) {
@@ -30,15 +26,27 @@ export async function claimUploadLease(context, payload, now = Date.now(), loadP
     const window = Math.floor(now / 60_000) * 60_000;
     const rate = await sql.prepare('INSERT INTO upload_relay_rate (id, window_start, starts) VALUES (1, ?, 1) ' +
         'ON CONFLICT(id) DO UPDATE SET window_start = excluded.window_start, starts = ' +
-        'CASE WHEN window_start = excluded.window_start THEN starts + 1 ELSE 1 END ' +
-        'WHERE window_start != excluded.window_start OR starts < 20 RETURNING starts')
+        'CASE WHEN upload_relay_rate.window_start = excluded.window_start THEN upload_relay_rate.starts + 1 ELSE 1 END ' +
+        'WHERE upload_relay_rate.window_start != excluded.window_start OR upload_relay_rate.starts < 20 RETURNING starts')
         .bind(window).first();
     if (!rate) throw new UploadRelayError(429, 'upload_rate_limited', Math.ceil((window + 60_000 - now) / 1000));
     await sql.prepare('DELETE FROM upload_relay_jobs WHERE lease_until <= ?').bind(now).run();
-    const lease = await sql.prepare('INSERT INTO upload_relay_jobs (upload_id, lease_owner, lease_until) ' +
+    return sql.prepare('INSERT INTO upload_relay_jobs (upload_id, lease_owner, lease_until) ' +
         'SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM upload_relay_jobs WHERE lease_until > ?) < 2 ' +
         'ON CONFLICT(upload_id) DO NOTHING RETURNING lease_until')
         .bind(payload.uploadId, payload.owner, now + 45_000, now).first();
+}
+
+export async function claimUploadLease(context, payload, now = Date.now(), loadProfile = uploadProfile) {
+    validateJob(payload);
+    const state = await getUploadRegistration(context.env, payload.uploadId, payload.fileId);
+    if (state.state !== 'missing' && state.state !== 'staged') return state;
+    const sql = getPrimaryDatabase(context.env);
+    const lease = typeof sql.transaction === 'function' ? await sql.transaction(async tx => {
+        // Acquire the global claim lock before taking the snapshot used to count active leases.
+        await tx.prepare('SELECT pg_advisory_xact_lock(769279928, 107301010)').first();
+        return acquireUploadLease(tx, payload, now);
+    }) : await acquireUploadLease(sql, payload, now);
     if (!lease) throw new UploadRelayError(429, 'upload_concurrency_limited', 2);
     try {
         // Recheck after the lease: another instance may have checkpointed during acquisition.

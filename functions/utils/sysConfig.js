@@ -95,7 +95,7 @@ export async function fetchSecurityConfig(env, options = {}) {
         return settings;
     } catch (error) {
         console.error('Failed to fetch security config:', error);
-        if (options.throwOnError) {
+        if (options.throwOnError || env.IMG_PRIMARY_PG !== undefined) {
             throw error;
         }
         // 返回默认配置

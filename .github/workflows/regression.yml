@@ -43,4 +43,4 @@ jobs:
         run: npm run test:server
 
       - name: Build Pages Functions
-        run: npx --no-install wrangler pages functions build functions --outdir data/ci-pages-build
+        run: npx --no-install wrangler pages functions build functions --compatibility-date=2024-09-23 --compatibility-flag=nodejs_compat --outdir data/ci-pages-build
